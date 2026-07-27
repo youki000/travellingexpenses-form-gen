@@ -1,5 +1,6 @@
-﻿---
+---
 name: "travellingexpenses-form-gen"
+label: "出差报销附件生成器"
 description: "出差报销附件生成器。当用户需要制作报销单、生成出差报销附件、整理报销凭证、填写报销明细表时触发此Skill。支持从ZIP压缩包中自动识别发票、行程单、支付凭证等文件，生成包含明细表和附件页的DOCX文件。"
 last_updated: "2026-07-23 12:05"
 ---
