@@ -1,0 +1,8 @@
+# travellingexpenses-form-gen Python 依赖
+# 安装：pip install -r requirements.txt
+python-docx>=1.1.0     # DOCX 生成（generate_docx.py）
+Pillow>=10.0.0         # 图片尺寸/比例计算（generate_docx.py, ocr_vouchers.py）
+lxml>=5.0.0            # DOCX XML 后处理去指纹（generate_docx.py）
+pdfplumber>=0.11.0     # PDF 文字/表格提取（parse_pdf_vouchers.py）
+pypdfium2>=4.0.0       # PDF 转 PNG（parse_pdf_vouchers.py）
+pytesseract>=0.3.10    # OCR 封装（ocr_vouchers.py）；Tesseract 二进制已打包于 assets/tesseract/
