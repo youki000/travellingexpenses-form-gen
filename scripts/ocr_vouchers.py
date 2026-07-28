@@ -1,80 +1,37 @@
 """
 OCR 识别图片类凭证，提取关键报销信息。
 用法: python ocr_vouchers.py <classified_json> <output_json>
-
-支持打包版 Tesseract（优先）和系统安装版 Tesseract（回退）。
+使用 PaddleOCR 3.x（中文识别引擎），无需额外安装 Tesseract。
 """
-
 import json
 import os
 import re
 import sys
 from pathlib import Path
-
-# ── Tesseract 定位：打包版优先，系统版回退 ──────────────────────
-def _find_tesseract():
-    """定位 tesseract 可执行文件。返回路径字符串或 None。"""
-    # 1) 打包在 skill assets 中
-    _skill_dir = Path(__file__).resolve().parent.parent
-    _bundled = _skill_dir / "assets" / "tesseract" / "tesseract.exe"
-    if _bundled.exists():
-        return str(_bundled)
-
-    # 2) 系统常见安装路径
-    _candidates = [
-        Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe"),
-        Path(r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe"),
-    ]
-    for c in _candidates:
-        if c.exists():
-            return str(c)
-
-    # 3) PATH 中查找
-    import shutil
-    p = shutil.which("tesseract")
-    if p:
-        return p
-
-    return None
-
-
-def _find_tessdata_prefix():
-    """返回 tessdata 目录前缀（用于 TESSDATA_PREFIX）。"""
-    _skill_dir = Path(__file__).resolve().parent.parent
-    _bundled_td = _skill_dir / "assets" / "tesseract" / "tessdata"
-    if _bundled_td.exists() and any(_bundled_td.glob("*.traineddata")):
-        return str(_bundled_td)
-    return None
-
-
-# 尝试导入 OCR 依赖
+# ── PaddleOCR 引擎初始化（单例，首次调用会下载模型到 ~/.paddleocr/）──
 OCR_AVAILABLE = False
-TESS_CMD = None
+OCR_ENGINE_NAME = "paddleocr-3.x"
+_ocr_engine = None
+def _get_ocr_engine():
+    """单例初始化 PaddleOCR，避免每张图都重新加载模型。"""
+    global _ocr_engine
+    if _ocr_engine is None:
+        from paddleocr import PaddleOCR
+        # use_angle_cls=True 自动校正文字方向；lang="ch" 中英文混排
+        _ocr_engine = PaddleOCR(use_angle_cls=True, lang="ch")
+    return _ocr_engine
 try:
-    import pytesseract
-    from PIL import Image, ExifTags
-    TESS_CMD = _find_tesseract()
-    if TESS_CMD:
-        pytesseract.pytesseract.tesseract_cmd = TESS_CMD
-        # 设置 TESSDATA_PREFIX 以便找到打包的语言包
-        _tdp = _find_tessdata_prefix()
-        if _tdp:
-            os.environ["TESSDATA_PREFIX"] = _tdp
-        OCR_AVAILABLE = True
-    else:
-        # 尝试不设 cmd（依赖系统 PATH）
-        try:
-            pytesseract.get_tesseract_version()
-            OCR_AVAILABLE = True
-        except Exception:
-            pass
-except ImportError:
-    pass
-
-
+    # 仅做轻量导入校验，真实模型懒加载（在 ocr_image 第一次调用时）
+    from paddleocr import PaddleOCR  # noqa: F401
+    import numpy as np  # paddleocr 需要 numpy 数组输入
+    OCR_AVAILABLE = True
+except ImportError as e:
+    print(f"[警告] PaddleOCR 导入失败: {e}")
+    OCR_AVAILABLE = False
 def correct_image_orientation(img):
     """根据 EXIF 信息校正图片方向。"""
     try:
+        from PIL import ExifTags
         orientation = None
         for tag, value in img.getexif().items():
             if tag in ExifTags.TAGS and ExifTags.TAGS[tag] == "Orientation":
@@ -89,62 +46,57 @@ def correct_image_orientation(img):
     except Exception:
         pass
     return img
-
-
 def resize_if_large(img, max_width=2000):
-    """如果图片宽度超过阈值则等比缩小。"""
+    """如果图片宽度超过阈值则等比缩小（PaddleOCR 内部已做，这里是双保险）。"""
     if img.width > max_width:
         ratio = max_width / img.width
         new_h = int(img.height * ratio)
         img = img.resize((max_width, new_h), Image.LANCZOS)
     return img
-
-
 def ocr_image(file_path):
-    """对单张图片执行 OCR，返回识别文本。"""
+    """对单张图片执行 OCR，返回识别文本（多行用 \\n 连接）。"""
+    import numpy as np
+    from PIL import Image
     img = Image.open(file_path)
     img = correct_image_orientation(img)
     img = resize_if_large(img)
-    text = pytesseract.image_to_string(img, lang="chi_sim+eng")
-    return text.strip()
-
-
+    engine = _get_ocr_engine()
+    # PaddleOCR 3.x：predict() 返回 list[OCRResult]，每个含 rec_texts 字段
+    results = engine.predict(np.array(img))
+    if not results:
+        return ""
+    # 单张图只取第一个 result
+    page = results[0]
+    texts = page["rec_texts"] if "rec_texts" in page else []
+    return "\n".join(texts).strip()
 # ── 正则模式 ──────────────────────────────────────────────
-
 # 金额：¥xxx.xx 或纯数字含千分位
 _AMOUNT_PATTERNS = [
     re.compile(r"[¥￥]\s*([\d,]+\.?\d*)"),
     re.compile(r"(?:合计|总[计额]|金额|总金额)[：:\s]*[¥￥]?\s*([\d,]+\.?\d*)"),
     re.compile(r"(?:实[收付]金额|应收金额|应付金额|价税合计)[：:\s]*[¥￥]?\s*([\d,]+\.?\d*)"),
 ]
-
 # 日期
 _DATE_PATTERNS = [
     re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"),
     re.compile(r"(\d{4})\s*[-/]\s*(\d{1,2})\s*[-/]\s*(\d{1,2})"),
     re.compile(r"(\d{4})\s*年\s*(\d{1,2})\s*月"),
 ]
-
 # 发票号
 _INVOICE_NO_PATTERN = re.compile(r"(?:发票[号码编号：:\s]*|No[.\s：:]*)\s*([\dA-Za-z]+)")
-
 # 城市
 _CITY_PATTERN = re.compile(r"([\u4e00-\u9fff]{2,4}(?:市|省|区|县|镇|州|盟))")
-
 # 起终点
 _ORIGIN_DEST_PATTERN = re.compile(
     r"([\u4e00-\u9fff\w\s]{2,20})\s*[→\->>－—~～至到]\s*([\u4e00-\u9fff\w\s]{2,20})"
 )
-
 # 公里数
 _KM_PATTERNS = [
     re.compile(r"([\d]+\.?\d*)\s*(?:公里|km|KM|Km|\.km|\s*km)"),
     re.compile(r"(?:总|全程|距离|里程)[：:\s]*([\d]+\.?\d*)\s*(?:公里|km|KM)"),
 ]
-
 # 航班号
 _FLIGHT_PATTERN = re.compile(r"\b(CA|MU|CZ|GS|HU|ZH|3U|MF|SC|FM|KN|GS)\s*(\d{3,4})\b")
-
 # ── 登机牌航线（如 "广州白云 T2" → "上海虹桥 T2"）─────────
 _BOARDING_ROUTE_PATTERN = re.compile(
     r"([\u4e00-\u9fff]+(?:机场|白云|虹桥|浦东|首都|大兴|宝安|萧山|双流|江北|禄口|咸阳|长水|新桥|龙湾|地窝铺|正定))\s*T?\d*\s*[\s→\-—~＞>]*\s*"
@@ -155,7 +107,6 @@ _BOARDING_ROUTE_PATTERN = re.compile(
 _BOARDING_AIRPORT_PATTERN = re.compile(
     r"([\u4e00-\u9fff]{2,4})(?:白云|虹桥|浦东|首都|大兴|宝安|萧山|双流|江北|禄口|咸阳|长水|新桥|龙湾|地窝铺|正定)?\s*[Tt]\d*"
 )
-
 # ── 酒店账单：入住/离店日期、酒店名称、房号、晚数 ────────
 _HOTEL_CHECKIN_PATTERN = re.compile(
     r"(?:到店|入住|入住时间)[：:\s]*(\d{4})[/-](\d{1,2})[/-](\d{1,2})"
@@ -169,13 +120,10 @@ _HOTEL_NAME_PATTERN = re.compile(
     r"维也纳国际|麗枫|希岸|潮漫|ZMAX|非繁城品|白玉兰|南苑|和颐|海友|"
     r"恒哲|莫泰|7天|IU|贝壳|城市便捷|精途)[^。\n，,]{0,20}"
 )
-
 # ── 支付确认金额（携程/美团等订单页）───────────────────
 _PAYMENT_CONFIRM_PATTERN = re.compile(
     r"(?:订单金额|支付金额|实付金额|已付款|扣取房费|合计)[：:\s]*[¥￥]?\s*([\d,]+\.?\d*)"
 )
-
-
 def parse_amount(text):
     """提取金额，返回 float 或 None。"""
     for pat in _AMOUNT_PATTERNS:
@@ -187,8 +135,6 @@ def parse_amount(text):
             except ValueError:
                 continue
     return None
-
-
 def parse_date(text):
     """提取日期，返回 yyyy-mm-dd 或 yyyy-mm 格式字符串，或 None。"""
     for pat in _DATE_PATTERNS:
@@ -199,28 +145,20 @@ def parse_date(text):
                 return f"{y}-{mo}-{d.zfill(2)}"
             return f"{y}-{mo}"
     return None
-
-
 def parse_invoice_no(text):
     """提取发票号，返回字符串或 None。"""
     m = _INVOICE_NO_PATTERN.search(text)
     return m.group(1) if m else None
-
-
 def parse_city(text):
     """提取城市/地点，返回字符串或 None。"""
     m = _CITY_PATTERN.search(text)
     return m.group(1) if m else None
-
-
 def parse_origin_destination(text):
     """提取起终点，返回 (origin, destination) 或 (None, None)。"""
     m = _ORIGIN_DEST_PATTERN.search(text)
     if m:
         return m.group(1).strip(), m.group(2).strip()
     return None, None
-
-
 def parse_distance_km(text):
     """提取公里数，返回 float 或 None。"""
     for pat in _KM_PATTERNS:
@@ -231,14 +169,10 @@ def parse_distance_km(text):
             except ValueError:
                 continue
     return None
-
-
 def parse_flight_no(text):
     """提取航班号，返回字符串或 None。"""
     m = _FLIGHT_PATTERN.search(text)
     return f"{m.group(1)}{m.group(2)}" if m else None
-
-
 def parse_boarding_route(text):
     """从登机牌/订单详情提取航线 (origin_airport, destination_airport)。"""
     m = _BOARDING_ROUTE_PATTERN.search(text)
@@ -249,8 +183,6 @@ def parse_boarding_route(text):
     if len(airports) >= 2:
         return airports[0].strip(), airports[1].strip()
     return None, None
-
-
 def parse_hotel_details(text):
     """从酒店账单/订单提取 {check_in, check_out, hotel_name, room_no}。"""
     result = {}
@@ -268,8 +200,6 @@ def parse_hotel_details(text):
     if rm:
         result["room_no"] = rm.group(1)
     return result
-
-
 def parse_payment_confirm(text):
     """从支付确认页/订单完成页提取金额。"""
     m = _PAYMENT_CONFIRM_PATTERN.search(text)
@@ -280,8 +210,6 @@ def parse_payment_confirm(text):
         except ValueError:
             pass
     return None
-
-
 def infer_type(text):
     """根据关键词推断文件类型。"""
     kw_map = [
@@ -302,8 +230,6 @@ def infer_type(text):
     if parse_distance_km(text) is not None:
         return "navigation"
     return "unknown"
-
-
 def process_one_image(file_path):
     """处理单张图片，返回结果字典。"""
     if not OCR_AVAILABLE:
@@ -311,7 +237,7 @@ def process_one_image(file_path):
             "file_path": file_path,
             "ocr_text": None,
             "ocr_available": False,
-            "tesseract_path": TESS_CMD or "(not found)",
+            "ocr_engine": OCR_ENGINE_NAME,
             "extracted": {
                 "amount": None, "date": None, "invoice_no": None,
                 "city": None, "origin": None, "destination": None,
@@ -324,7 +250,6 @@ def process_one_image(file_path):
             },
             "inferred_type": "unknown",
         }
-
     text = ocr_image(file_path)
     origin, dest = parse_origin_destination(text)
     b_orig, b_dest = parse_boarding_route(text)
@@ -334,7 +259,7 @@ def process_one_image(file_path):
         "file_path": file_path,
         "ocr_text": text,
         "ocr_available": True,
-        "tesseract_path": TESS_CMD or "",
+        "ocr_engine": OCR_ENGINE_NAME,
         "extracted": {
             "amount": parse_amount(text),
             "date": parse_date(text),
@@ -355,23 +280,17 @@ def process_one_image(file_path):
         },
         "inferred_type": infer_type(text),
     }
-
-
 def main():
     if len(sys.argv) < 3:
         print("用法: python ocr_vouchers.py <classified_json> <output_json>")
         sys.exit(1)
-
     classified_path = sys.argv[1]
     output_path = sys.argv[2]
-
     classified_path = Path(classified_path)
     output_path = Path(output_path)
     base_dir = classified_path.parent
-
     with open(classified_path, "r", encoding="utf-8") as f:
         classified = json.load(f)
-
     # 定位 classified.json 中 type="image" 的文件
     files = []
     if isinstance(classified, list):
@@ -387,22 +306,13 @@ def main():
             files = [item for item in classified["files"] if item.get("type") == "image"]
         elif "results" in classified:
             files = [item for item in classified["results"] if item.get("type") == "image"]
-
     print(f"共发现 {len(files)} 个图片凭证")
-
     if not OCR_AVAILABLE:
-        print(f"[警告] Tesseract 未找到 (搜索路径: {TESS_CMD or '(无)'})，将跳过 OCR 处理")
-        print("  请安装 Tesseract 或确认 skill/assets/tesseract/ 中包含打包版")
+        print(f"[警告] PaddleOCR 未安装，将跳过 OCR 处理")
+        print("  请执行: pip install paddleocr>=3.0.0 paddlepaddle>=3.0.0")
     else:
-        print(f"[OK] Tesseract: {TESS_CMD}")
-        # 检查可用语言
-        try:
-            langs = pytesseract.get_languages()
-            has_chi = "chi_sim" in langs
-            print(f"  可用语言: {', '.join(langs)} ({'含中文' if has_chi else '无中文'})")
-        except Exception:
-            print("  (无法列出语言)")
-
+        print(f"[OK] PaddleOCR 引擎已就绪（{OCR_ENGINE_NAME}）")
+        print("  首次调用会从 PaddleX 模型源下载中英文识别模型（~100MB，缓存到 ~/.paddleocr/）")
     results = []
     for i, item in enumerate(files, 1):
         fp = item.get("file_path") or item.get("path", "")
@@ -412,21 +322,16 @@ def main():
         results.append(result)
         ext = result["extracted"]
         print(f"  类型推断: {result['inferred_type']}  金额: {ext['amount']}  日期: {ext['date']}")
-
     output = {"results": results}
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
-
     print(f"\n处理完成，结果已保存至: {output_path}")
-
     # 摘要
     types = {}
     for r in results:
         t = r["inferred_type"]
         types[t] = types.get(t, 0) + 1
     print("类型统计:", json.dumps(types, ensure_ascii=False))
-
-
 if __name__ == "__main__":
     main()

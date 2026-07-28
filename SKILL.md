@@ -10,7 +10,8 @@ last_updated: "2026-07-23 12:05"
 > - 2026-07-23 11:24：窄图 solo 放大 —— 单张窄图独处一行时放大到占满页面可用高度（如 12.2×26.5cm），消除"半空页"（原 8.9×19.3cm 仅占半页）。已撤回（见 12:05）。
 > - 2026-07-23 11:07：标签防孤立加固 —— 修复类别标签与首图分离问题（如"【住宿】"在上一页底部、图片全在下一页）。方案：标签渲染前先收集本类图片并预估首行高度，若"当前页已用高度 + 标签高 + 首行高 > 26.5cm"则提前换页，确保标签至少与首张图同页。
 > - 2026-07-23 10:33：数据完整性修复 —— 误餐补贴 description 去除"误餐补贴"前缀（与 item 列去重）；返程条目（机票/网约车回程）共享去程 page_images，避免附件页凭证缺失假象；`exp.get("item", project)` → `exp.get("item") or project` 增强空字符串回退。
-> - 2026-07-22 18:00：附件拼版重构 —— PDF 文档型凭证（发票/行程单/报销单/账单）统一与页面同宽 18cm；图片只指定宽度、高度自动按原始比例计算，杜绝拉伸变形；跨类别连续拼版（仅整行放不下才换页），消除空白页；明细表"姓名"去除中间空格。补充 `requirements.txt`，Tesseract 二进制（含 chi_sim/eng）已打包至 `assets/tesseract/`。
+> - 2026-07-22 18:00：附件拼版重构 —— ... 补充 `requirements.txt`，**OCR 引擎切换为 PaddleOCR 3.x（首次运行自动下载中英文模型到 ~/.paddleocr/），删除原 `assets/tesseract/` 目录**。 
+> - 2026-07-28 15:30：OCR 引擎迁移 —— `pytesseract` + 打包 Tesseract → `paddleocr` 3.x + `paddlepaddle`，适配飞书 Linux 沙箱，去除 Windows 二进制依赖。
 
 # 出差报销附件生成器
 
@@ -124,7 +125,7 @@ python scripts/ocr_vouchers.py <classified.json> <output_dir>/ocr_results.json
 **功能**：
 - 对所有图片类文件（type="image"）进行 OCR 识别
 - 提取关键信息：金额、日期、城市、起终点、发票号等
-- 如果系统未安装 Tesseract，则标记为 `ocr_available: false`，跳过识别
+- 如果 PaddleOCR 未安装或初始化失败，则标记为 `ocr_available: false`，跳过识别
 
 **输出**：
 ```json
@@ -138,8 +139,9 @@ python scripts/ocr_vouchers.py <classified.json> <output_dir>/ocr_results.json
 ```
 
 **依赖**：
-- `pytesseract` + `Pillow`（OCR 引擎）
-- `Tesseract-OCR` 系统安装（可选，未安装则跳过）
+-  `paddleocr` >= 3.0.0（OCR 引擎，自动下载中英文识别模型） 
+-  `paddlepaddle` >= 3.0.0（paddleocr 依赖） 
+-  `Pillow` + `numpy`（图片处理）
 
 ---
 
@@ -386,7 +388,7 @@ python scripts/generate_docx.py <analysis.json> <output_docx> --name <姓名> --
 | 脚本 | Python 依赖 | 系统依赖 |
 |------|-------------|----------|
 | extract_and_classify.py | 无 | 无 |
-| ocr_vouchers.py | pytesseract, Pillow | Tesseract-OCR（**已打包** `assets/tesseract/`，含 chi_sim/eng） |
+| ocr_vouchers.py | paddleocr, paddlepaddle, Pillow, numpy | 无（首次调用自动下载模型） |
 | parse_pdf_vouchers.py | pdfplumber, pypdfium2 | 无 |
 | analyze_and_validate.py | 无 | 无 |
 | generate_docx.py | python-docx, Pillow, lxml | 无 |
@@ -396,7 +398,11 @@ python scripts/generate_docx.py <analysis.json> <output_docx> --name <姓名> --
 pip install -r requirements.txt
 ```
 
-> **OCR 二进制已封装**：`ocr_vouchers.py` 会自动优先使用 `assets/tesseract/tesseract.exe` 及其 `tessdata/`（chi_sim + eng），无需用户单独安装 Tesseract；找不到打包版时才回退系统安装版。
+>  **OCR 引擎**：`ocr_vouchers.py` 使用 PaddleOCR 3.x（`lang="ch"`，中英文混排），无需用户手动安装任何 OCR 二进制。 
+>
+> 首次调用时会自动从 PaddleX 模型源下载约 100MB 识别模型（det + cls + rec + 字典）到 `~/.paddleocr/`，后续直接复用，无需重复下载。 
+>
+> 飞书 Linux 沙箱已预装 `paddlepaddle 3.2.2` + `paddleocr 3.3.2`，部署到沙箱时无需 `pip install`；本地或非沙箱环境需 `pip install paddleocr>=3.0 paddlepaddle>=3.0`。
 
 ---
 
